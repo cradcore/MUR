@@ -9,7 +9,12 @@
             "type": "python",
             "request": "launch",
             "program": "${workspaceRoot}/mur.py",
-            "console": "integratedTerminal"
+            "console": "integratedTerminal",
+            "args": [
+                "-u",
+                "https://www.marvel.com/comics/series/31568/star_wars_war_of_the_bounty_hunters_2021_-_present",
+                "-f",
+                "cbz"
             ]
         }
     ]

@@ -11,6 +11,8 @@ import argparse
 import platform
 import tempfile
 
+from requests.models import parse_url
+
 import api
 import img2pdf
 from tqdm import tqdm
@@ -21,12 +23,13 @@ client = api.Client()
 
 
 def print_title():
-	print("""
- _____ _____ _____ 
+    print("""
+ _____ _____ _____
 |     |  |  | __  |
 | | | |  |  |    -|
 |_|_|_|_____|__|__|
    """)
+
 
 def get_os():
     return platform.system() == 'Windows'
@@ -48,11 +51,11 @@ def sanitize(fn):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description='Sorrow446.'
+        description='cradcore.'
     )
     parser.add_argument(
         '-u', '--url',
-        help="URL - marvel.com/comics/issue/ or read.marvel.com/#/book/.",
+        help="URL - www.marvel.com/comics/issue/# or read.marvel.com/#/book/. or www.marvel.com/com/ics/series/#",
         nargs='*',
         required=True
     )
@@ -67,13 +70,21 @@ def parse_args():
         help="Write comic's metadata to JSON file.",
         action='store_true'
     )
+    parser.add_argument(
+        '--priv',
+        help="Marvel developer account private key"
+    )
+    parser.add_argument(
+        '--pub',
+        help="Marvel developer account public key"
+    )
     return parser.parse_args()
 
 
 def parse_cookies(cd, out_cookies={}):
     cookies_path = os.path.join(cd, 'cookies.txt')
     if not os.path.exists(cookies_path):
-        err("%s does not exist! Please save this from the cookies.txt extension before running" % cookies_path, 1, 1)
+        err("%s does not exist! Please save this file from the cookies.txt chrome/firefox extension before running" % cookies_path, 1, 1)
     with open(cookies_path) as f:
         for line in f:
             if not line.startswith('#') and not line == '\n':
@@ -104,13 +115,14 @@ def title_dir_setup(title_dir):
 
 def check_url(url):
     regexes = [
-        r'http[s]://(read).marvel.com/#/book/([0-9]+$)',
-        r'http[s]://(www).marvel.com/comics/issue/([0-9]+)/.+'
+        r'http[s]://(read).marvel.com/#/(book)/([0-9]+$)',
+        r'http[s]://(www).marvel.com/comics/(issue)/([0-9]+)/.+',
+        r'http[s]://(www).marvel.com/comics/(series)/([0-9]+)/.+'
     ]
     for regex in regexes:
         match = re.match(regex, url)
         if match:
-            return match.group(1), match.group(2)
+            return match.group(1), match.group(2), match.group(3)
 
 
 def download(urls, tmp_dir, cur=0):
@@ -153,30 +165,68 @@ def err(e, cur, tot):
     if cur == tot:
         sys.exit(1)
 
+def parse_keys(cd, private, public):
+    if private is not None and public is not None:
+        return private, public
+    keys_file = os.path.join(cd, "keys.txt")
+    if not exist_check(keys_file):
+        return None, None
+    with open(keys_file, 'r') as f:
+        lines = f.read().splitlines()
+        if len(lines) != 2:
+            err("Invalid keys.txt format. You must have the private key on the first line, and public key on the second line", 1, 1)
+        return lines[0], lines[1]
 
 def main():
     if hasattr(sys, 'frozen'):
         cd = os.path.dirname(sys.executable)
     else:
         cd = os.path.dirname(__file__)
+
+    # Create directories
     tmp_dir = os.path.join(tempfile.gettempdir(), 'mur')
     dl_dir = os.path.join(cd, 'downloads')
     dir_setup(tmp_dir, dl_dir)
+
+    # Parse cookies and arguments
     parse_cookies(cd)
     args = parse_args()
-    tot = len(args.url)
-    cur = 0
+    private_key, public_key = parse_keys(cd, args.priv, args.pub)
+
+    # Check if entire series URL was passed in
+    urls = []
     for url in args.url:
+        _, scope, id = check_url(url)
+        # If so, get URLs for individual issues
+        if scope == 'series':
+            if not client.is_series():
+                client.set_series(True)
+            if not client.has_keys():
+                if private_key is None or public_key is None:
+                    err("To download an entire series, you must pass in your public and private Marvel developer keys", 1, 1)
+                client.set_keys(private_key, public_key)
+            issueIds = client.parse_series(id)
+            for issueId in issueIds:
+                issueUrl = client.get_issue_url_from_id(issueId)
+                urls.append(issueUrl)
+        else:
+            urls.append(url)
+    if client.is_series():
+        client.set_series(False)
+
+    tot = len(urls)
+    cur = 0
+    for url in urls:
         cur += 1
         try:
             print("Comic {} of {}:".format(cur, tot))
             try:
-                type, id = check_url(url)
+                type, _, id = check_url(url)
             except TypeError:
                 err('Invalid URL: '+str(url), cur, tot)
                 continue
             if type == "www":
-                id = client.get_id(url)
+                id = client.get_issue_id(url)
             fmt = args.format
             meta = client.get_comic_meta(id)
             title = meta['title']
@@ -203,7 +253,8 @@ def main():
                 make_cbz(abs, images)
             if args.meta:
                 print("Writing metadata to JSON file...")
-                meta_abs = os.path.join(series_path, '{}_meta.json'.format(title_s))
+                meta_abs = os.path.join(
+                    series_path, '{}_meta.json'.format(title_s))
                 write_meta(meta_abs, meta)
             for i in images:
                 os.remove(i)
